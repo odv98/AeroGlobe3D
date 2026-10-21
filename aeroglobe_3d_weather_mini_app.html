@@ -1,0 +1,1095 @@
+<!DOCTYPE html>
+<html lang="ru" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AeroGlobe 3D — Погода на Глобусе</title>
+    <!-- Telegram WebApp SDK -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Three.js & Globe.gl for Google Earth-like 3D Globe -->
+    <script src="https://unpkg.com/three@0.158.0/build/three.min.js"></script>
+    <script src="https://unpkg.com/globe.gl@2.30.0/dist/globe.gl.min.js"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Google Fonts: Inter -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        * {
+            -webkit-tap-highlight-color: transparent;
+            box-sizing: border-box;
+        }
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #050811;
+            color: #f8fafc;
+            font-family: 'Inter', sans-serif;
+            overflow: hidden;
+            height: 100vh;
+            width: 100vw;
+        }
+        /* Стеклянный морфизм */
+        .glass-panel {
+            background: rgba(15, 23, 42, 0.72);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+        }
+        .glass-card-inner {
+            background: rgba(15, 23, 42, 0.60);
+            backdrop-filter: blur(14px);
+            -webkit-backdrop-filter: blur(14px);
+            border: 1px solid rgba(255, 255, 255, 0.14);
+        }
+        /* Скрытие скроллбаров с сохранением прокрутки */
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .no-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+        /* Маркеры на 3D глобусе */
+        .globe-pin {
+            pointer-events: auto;
+            cursor: pointer;
+            transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+            user-select: none;
+        }
+        .globe-pin:hover {
+            transform: scale(1.15) translateY(-2px);
+            z-index: 50;
+        }
+        /* Анимация вспышки молнии */
+        @keyframes lightning-flash {
+            0%, 92%, 96%, 100% { opacity: 0; }
+            94%, 98% { opacity: 0.65; }
+        }
+        .lightning-overlay {
+            animation: lightning-flash 6s infinite;
+        }
+        /* Плавный зум фонового фото города */
+        @keyframes ken-burns {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.08); }
+            100% { transform: scale(1); }
+        }
+        .city-bg-image {
+            animation: ken-burns 28s ease-in-out infinite;
+        }
+    </style>
+</head>
+<body class="relative w-screen h-screen overflow-hidden select-none">
+
+    <!-- ================= 3D GLOBE VIEWPORT ================= -->
+    <div id="globe-container" class="absolute inset-0 z-0 cursor-grab active:cursor-grabbing"></div>
+
+    <!-- Vignette & Subtle Space Ambient Glow -->
+    <div class="pointer-events-none absolute inset-0 z-10 bg-[radial-gradient(circle_at_center,transparent_55%,rgba(3,7,18,0.85)_100%)]"></div>
+
+    <!-- ================= TOP FLOATING BAR: SEARCH & FAVORITES ================= -->
+    <header class="absolute top-0 left-0 right-0 z-30 p-3 sm:p-4 flex flex-col gap-2.5 max-w-4xl mx-auto pointer-events-none">
+        
+        <div class="flex items-center gap-2 pointer-events-auto">
+            <!-- Brand Badge -->
+            <div onclick="resetGlobeView()" class="glass-panel px-3 py-2.5 rounded-2xl flex items-center gap-2 cursor-pointer hover:bg-slate-800/80 transition shrink-0 shadow-lg" title="Сбросить камеру глобуса">
+                <div class="w-8 h-8 rounded-xl bg-gradient-to-tr from-blue-500 to-cyan-400 flex items-center justify-center shadow-md shadow-blue-500/30">
+                    <i data-lucide="globe-2" class="w-5 h-5 text-slate-950"></i>
+                </div>
+                <div class="hidden sm:block">
+                    <h1 class="text-xs font-extrabold tracking-tight text-white leading-none">AeroGlobe</h1>
+                    <span class="text-[10px] text-cyan-400 font-medium">3D Метеорадар</span>
+                </div>
+            </div>
+
+            <!-- City Search Input with Autocomplete -->
+            <div class="relative flex-1">
+                <div class="glass-panel rounded-2xl flex items-center px-3.5 py-2 shadow-lg focus-within:border-cyan-400/60 transition">
+                    <i data-lucide="search" class="w-4 h-4 text-slate-400 mr-2.5 shrink-0"></i>
+                    <input 
+                        id="city-search-input" 
+                        type="text" 
+                         autocomplete="off"
+                        placeholder="Поиск города или кликните в любую точку глобуса..." 
+                        class="w-full bg-transparent text-xs sm:text-sm text-white placeholder-slate-400 focus:outline-none"
+                    >
+                    <button id="clear-search-btn" onclick="clearSearch()" class="hidden text-slate-400 hover:text-white p-1">
+                        <i data-lucide="x" class="w-4 h-4"></i>
+                    </button>
+                </div>
+
+                <!-- Autocomplete Dropdown -->
+                <div id="search-results" class="hidden absolute left-0 right-0 mt-2 glass-panel rounded-2xl overflow-hidden shadow-2xl divide-y divide-white/10 max-h-72 overflow-y-auto z-50">
+                </div>
+            </div>
+
+            <!-- Random Location / Geolocation Button -->
+            <button onclick="flyToRandomPlace()" class="glass-panel p-2.5 rounded-2xl text-cyan-400 hover:text-white hover:bg-slate-800/80 transition shadow-lg shrink-0" title="Случайная точка мира">
+                <i data-lucide="compass" class="w-5 h-5"></i>
+            </button>
+        </div>
+
+        <!-- Quick Cities Bar -->
+        <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar pointer-events-auto pb-1" id="quick-cities-bar">
+            <!-- Populated by JS -->
+        </div>
+    </header>
+
+    <!-- ================= HELPER HINT PILL (BOTTOM CENTER WHEN CARD IS MINIMIZED) ================= -->
+    <div id="globe-hint-pill" class=" absolute bottom-5 left-1/2 -translate-x-1/2 z-20 pointer-events-none transition-all duration-300">
+        <div class="glass-panel px-4 py-2 rounded-full flex items-center gap-2 text-xs text-slate-200 shadow-xl border border-cyan-500/30">
+            <span class="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></span>
+            <span id="globe-status-text">Нажмите на любую точку Земли или выберите город</span>
+        </div>
+    </div>
+
+    <!-- ================= WEATHER CITY CARD (PHOTO BACKGROUND + WEATHER CANVAS OVERLAY) ================= -->
+    <aside id="weather-card-wrapper" class="fixed z-30 transition-all duration-500 ease-out bottom-0 left-0 right-0 sm:left-auto sm:right-5 sm:bottom-5 sm:w-[430px] max-h-[84vh] flex flex-col pointer-events-auto translate-y-0">
+        
+        <!-- Card Main Container -->
+        <div class="relative w-full rounded-t-3xl sm:rounded-3xl overflow-hidden shadow-[0_20px_70px_rgba(0,0,0,0.85)] border border-white/20 flex flex-col max-h-[84vh] bg-slate-950">
+            
+            <!-- 1. DYNAMIC CITY PHOTOGRAPH BACKGROUND -->
+            <div class="absolute inset-0 z-0 overflow-hidden">
+                <img 
+                    id="city-bg-photo" 
+                    src="https://images.unsplash.com/photo-1513326738677-b964603b136d?auto=format&fit=crop&w=1000&q=80" 
+                    alt="City Background" 
+                    class="city-bg-image w-full h-full object-cover object-center transition-opacity duration-700"
+                    onerror="this.src='https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?auto=format&fit=crop&w=1000&q=80'"
+                >
+                <!-- Gradient Scrim for Perfect Text Readability -->
+                <div id="weather-tint-overlay" class="absolute inset-0 bg-gradient-to-b from-slate-950/65 via-slate-950/55 to-slate-950/95 transition-colors duration-700"></div>
+                <!-- Lightning Flash Layer (Active only during Thunderstorm) -->
+                <div id="lightning-layer" class="hidden absolute inset-0 bg-white pointer-events-none lightning-overlay"></div>
+            </div>
+
+            <!-- 2. LIVE WEATHER PARTICLE CANVAS (RAIN, SNOW, SUNRAYS, CLOUDS) -->
+            <canvas id="weather-fx-canvas" class="absolute inset-0 w-full h-full pointer-events-none z-10"></canvas>
+
+            <!-- 3. FOREGROUND CARD CONTENT -->
+            <div class="relative z-20 flex flex-col overflow-y-auto no-scrollbar p-4 sm:p-5 space-y-4">
+                
+                <!-- Mobile Drag Handle & Top Actions -->
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <span id="live-weather-badge" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 backdrop-blur-md">
+                            <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                            <span>Метеоспутник Live</span>
+                        </span>
+                        <span id="city-coords-badge" class="text-[11px] font-mono text-slate-300 bg-black/40 px-2.5 py-1 rounded-full backdrop-blur-md">
+                            55.75° N, 37.61° E
+                        </span>
+                    </div>
+
+                    <div class="flex items-center gap-1.5">
+                        <button onclick="toggleCardMinimize()" id="minimize-card-btn" class="p-2 rounded-full bg-black/40 hover:bg-black/60 text-white border border-white/15 transition" title="Свернуть/Развернуть карточку">
+                            <i data-lucide="chevron-down" class="w-4 h-4"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- City Header & Main Temperature -->
+                <div class="flex items-end justify-between pt-2">
+                    <div class="space-y-1 max-w-[62%]">
+                        <div class="flex items-center gap-1.5 text-cyan-300 text-xs font-semibold">
+                            <i data-lucide="map-pin" class="w-3.5 h-3.5 shrink-0"></i>
+                            <span id="city-country" class="truncate">Россия • Местное время <span id="city-local-time">15:30</span></span>
+                        </div>
+                        <h2 id="city-title" class="text-2xl sm:text-3xl font-black text-white tracking-tight leading-tight drop-shadow-md">
+                            Москва
+                        </h2>
+                        <p id="weather-description" class="text-sm font-semibold text-amber-300 drop-shadow flex items-center gap-1.5">
+                            <span id="weather-emoji" class="text-lg">🌧️</span>
+                            <span id="weather-desc-text">Небольшой дождь</span>
+                        </p>
+                    </div>
+
+                    <div class="text-right">
+                        <div class="text-5xl sm:text-6xl font-black text-white tracking-tighter drop-shadow-lg" id="main-temp">
+                            +14°
+                        </div>
+                        <p class="text-xs text-slate-200 font-medium mt-0.5 drop-shadow">
+                            Ощущается как <span id="feels-like-temp" class="font-bold text-white">+12°</span>
+                        </p>
+                    </div>
+                </div>
+
+                <!-- Collapsible Body Wrapper -->
+                <div id="card-collapsible-body" class="space-y-4 transition-all duration-300">
+
+                    <!-- Interactive Weather Effect Switcher (Allows testing Rain, Snow, Storm, Clear on the card!) -->
+                    <div class="glass-card-inner rounded-2xl p-2.5 space-y-1.5">
+                        <div class="flex items-center justify-between px-1">
+                            <span class="text-[10px] font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1">
+                                <i data-lucide="sparkles" class="w-3 h-3 text-cyan-400"></i>
+                                Атмосфера на карточке (Реальная / Просмотр)
+                            </span>
+                            <button onclick="restoreRealWeatherEffect()" id="btn-restore-real-fx" class="hidden text-[10px] font-bold text-cyan-400 hover:underline">
+                                Вернуть реальную
+                            </button>
+                        </div>
+                        <div class="grid grid-cols-5 gap-1 text-center">
+                            <button onclick="setWeatherEffectManual('clear')" id="fx-btn-clear" class="fx-btn py-1.5 px-1 rounded-xl text-[11px] font-semibold bg-white/5 hover:bg-white/15 text-slate-200 transition flex flex-col items-center gap-0.5">
+                                <span>☀️</span>
+                                <span class="text-[10px]">Ясно</span>
+                            </button>
+                            <button onclick="setWeatherEffectManual('rain')" id="fx-btn-rain" class="fx-btn py-1.5 px-1 rounded-xl text-[11px] font-semibold bg-white/5 hover:bg-white/15 text-slate-200 transition flex flex-col items-center gap-0.5">
+                                <span>🌧️</span>
+                                <span class="text-[10px]">Дождь</span>
+                            </button>
+                            <button onclick="setWeatherEffectManual('storm')" id="fx-btn-storm" class="fx-btn py-1.5 px-1 rounded-xl text-[11px] font-semibold bg-white/5 hover:bg-white/15 text-slate-200 transition flex flex-col items-center gap-0.5">
+                                <span>⛈️</span>
+                                <span class="text-[10px]">Гроза</span>
+                            </button>
+                            <button onclick="setWeatherEffectManual('snow')" id="fx-btn-snow" class="fx-btn py-1.5 px-1 rounded-xl text-[11px] font-semibold bg-white/5 hover:bg-white/15 text-slate-200 transition flex flex-col items-center gap-0.5">
+                                <span>❄️</span>
+                                <span class="text-[10px]">Снег</span>
+                            </button>
+                            <button onclick="setWeatherEffectManual('clouds')" id="fx-btn-clouds" class="fx-btn py-1.5 px-1 rounded-xl text-[11px] font-semibold bg-white/5 hover:bg-white/15 text-slate-200 transition flex flex-col items-center gap-0.5">
+                                <span>🌫️</span>
+                                <span class="text-[10px]">Туман</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Detailed Metrics Grid (4 items) -->
+                    <div class="grid grid-cols-4 gap-2">
+                        <div class="glass-card-inner rounded-2xl p-2.5 text-center">
+                            <div class="flex items-center justify-center text-cyan-400 mb-1">
+                                <i data-lucide="wind" class="w-4 h-4"></i>
+                            </div>
+                            <p class="text-[10px] text-slate-300">Ветер</p>
+                            <p id="metric-wind" class="text-xs font-extrabold text-white mt-0.5">4.2 м/с</p>
+                        </div>
+
+                        <div class="glass-card-inner rounded-2xl p-2.5 text-center">
+                            <div class="flex items-center justify-center text-blue-400 mb-1">
+                                <i data-lucide="droplets" class="w-4 h-4"></i>
+                            </div>
+                            <p class="text-[10px] text-slate-300">Влажность</p>
+                            <p id="metric-humidity" class="text-xs font-extrabold text-white mt-0.5">68%</p>
+                        </div>
+
+                        <div class="glass-card-inner rounded-2xl p-2.5 text-center">
+                            <div class="flex items-center justify-center text-purple-400 mb-1">
+                                <i data-lucide="gauge" class="w-4 h-4"></i>
+                            </div>
+                            <p class="text-[10px] text-slate-300">Давление</p>
+                            <p id="metric-pressure" class="text-xs font-extrabold text-white mt-0.5">752 мм</p>
+                        </div>
+
+                        <div class="glass-card-inner rounded-2xl p-2.5 text-center">
+                            <div class="flex items-center justify-center text-amber-400 mb-1">
+                                <i data-lucide="eye" class="w-4 h-4"></i>
+                            </div>
+                            <p class="text-[10px] text-slate-300">Осадки</p>
+                            <p id="metric-precip" class="text-xs font-extrabold text-white mt-0.5">0.4 мм</p>
+                        </div>
+                    </div>
+
+                    <!-- Hourly Forecast (24 Hours) -->
+                    <div class="glass-card-inner rounded-2xl p-3 space-y-2">
+                        <div class="flex items-center justify-between">
+                            <h3 class="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                                <i data-lucide="clock" class="w-3.5 h-3.5 text-cyan-400"></i>
+                                Почасовой прогноз (24 ч)
+                            </h3>
+                            <span id="photo-source-label" class="text-[10px] text-slate-400">Фото: Википедия / Live</span>
+                        </div>
+                        <div id="hourly-forecast-container" class="flex items-center gap-2.5 overflow-x-auto no-scrollbar pt-1">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+
+                    <!-- 5-Day Forecast -->
+                    <div class="glass-card-inner rounded-2xl p-3 space-y-2">
+                        <h3 class="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                            <i data-lucide="calendar" class="w-3.5 h-3.5 text-cyan-400"></i>
+                            Прогноз по дням
+                        </h3>
+                        <div id="daily-forecast-container" class="divide-y divide-white/10">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+    </aside>
+
+    <script>
+        // =========================================================================
+        // 1. TELEGRAM MINI APP INITIALIZATION & HAPTICS
+        // =========================================================================
+        const tg = window.Telegram?.WebApp;
+        if (tg) {
+            tg.ready();
+            tg.expand();
+            try {
+                tg.setHeaderColor('#050811');
+                tg.setBackgroundColor('#050811');
+            } catch (e) {}
+        }
+
+        function haptic(style = 'light') {
+            if (tg?.HapticFeedback) {
+                if (['success', 'warning', 'error'].includes(style)) {
+                    tg.HapticFeedback.notificationOccurred(style);
+                } else {
+                    tg.HapticFeedback.impactOccurred(style);
+                }
+            }
+        }
+
+        // =========================================================================
+        // 2. CURATED CITIES & PHOTO FALLBACK REPOSITORY
+        // =========================================================================
+        const PRESET_CITIES = [
+            { name: 'Москва', enName: 'Moscow', country: 'Россия', lat: 55.7558, lng: 37.6173, photo: 'https://images.unsplash.com/photo-1513326738677-b964603b136d?auto=format&fit=crop&w=1000&q=80', temp: null },
+            { name: 'Санкт-Петербург', enName: 'Saint Petersburg', country: 'Россия', lat: 59.9343, lng: 30.3351, photo: 'https://images.unsplash.com/photo-1556610961-2fecc5927173?auto=format&fit=crop&w=1000&q=80', temp: null },
+            { name: 'Токио', enName: 'Tokyo', country: 'Япония', lat: 35.6762, lng: 139.6503, photo: 'https://images.unsplash.com/photo-1503899036084-c55cdd92da26?auto=format&fit=crop&w=1000&q=80', temp: null },
+            { name: 'Дубай', enName: 'Dubai', country: 'ОАЭ', lat: 25.2048, lng: 55.2708, photo: 'https://images.unsplash.com/photo-1512453979798-5ea266f8880c?auto=format&fit=crop&w=1000&q=80', temp: null },
+            { name: 'Нью-Йорк', enName: 'New York', country: 'США', lat: 40.7128, lng: -74.0060, photo: 'https://images.unsplash.com/photo-1496442226666-8d4d0e62e6e9?auto=format&fit=crop&w=1000&q=80', temp: null },
+            { name: 'Париж', enName: 'Paris', country: 'Франция', lat: 48.8566, lng: 2.3522, photo: 'https://images.unsplash.com/photo-1502602898657-3e91760cbb34?auto=format&fit=crop&w=1000&q=80', temp: null },
+            { name: 'Лондон', enName: 'London', country: 'Великобритания', lat: 51.5074, lng: -0.1278, photo: 'https://images.unsplash.com/photo-1513635269975-59663e0ac1ad?auto=format&fit=crop&w=1000&q=80', temp: null },
+            { name: 'Рио-де-Жанейро', enName: 'Rio de Janeiro', country: 'Бразилия', lat: -22.9068, lng: -43.1729, photo: 'https://images.unsplash.com/photo-1483729558449-99ef09a8c325?auto=format&fit=crop&w=1000&q=80', temp: null },
+            { name: 'Сидней', enName: 'Sydney', country: 'Австралия', lat: -33.8688, lng: 151.2093, photo: 'https://images.unsplash.com/photo-1506973035872-a4ec16b8e8d9?auto=format&fit=crop&w=1000&q=80', temp: null },
+            { name: 'Рейкьявик', enName: 'Reykjavik', country: 'Исландия', lat: 64.1466, lng: -21.9426, photo: 'https://images.unsplash.com/photo-1504893524553-b855bce32c67?auto=format&fit=crop&w=1000&q=80', temp: null }
+        ];
+
+        // Красивые архитектурные и природные фото-заглушки по широтам/климату, если у мелкого населенного пункта нет фото в Википедии
+        const SCENIC_FALLBACK_PHOTOS = [
+            'https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?auto=format&fit=crop&w=1000&q=80', // Мегаполис
+            'https://images.unsplash.com/photo-1514565131-fce0801e5785?auto=format&fit=crop&w=1000&q=80', // Вечерний город
+            'https://images.unsplash.com/photo-1480714378408-67cf0d13bc1b?auto=format&fit=crop&w=1000&q=80', // Небоскребы
+            'https://images.unsplash.com/photo-1519501025264-65ba15a82390?auto=format&fit=crop&w=1000&q=80', // Городские огни
+            'https://images.unsplash.com/photo-1449824913935-59a10b8d2000?auto=format&fit=crop&w=1000&q=80'  // Панорама города
+        ];
+
+        // =========================================================================
+        // 3. WMO WEATHER CODES MAPPING (OPEN-METEO -> RUSSIAN + PARTICLE EFFECT)
+        // =========================================================================
+        function interpretWeatherCode(code, isDay = 1) {
+            const map = {
+                0:  { text: isDay ? 'Ясно и солнечно' : 'Ясное звездное небо', emoji: isDay ? '☀️' : '🌙', fx: 'clear' },
+                1:  { text: 'Преимущественно ясно', emoji: isDay ? '🌤️' : '🌙', fx: 'clear' },
+                2:  { text: 'Переменная облачность', emoji: '⛅', fx: 'clouds' },
+                3:  { text: 'Пасмурно', emoji: '☁️', fx: 'clouds' },
+                45: { text: 'Густой туман', emoji: '🌫️', fx: 'clouds' },
+                48: { text: 'Изморозь и туман', emoji: '🌫️', fx: 'clouds' },
+                51: { text: 'Легкая морось', emoji: '🌦️', fx: 'rain' },
+                53: { text: 'Умеренная морось', emoji: '🌧️', fx: 'rain' },
+                55: { text: 'Плотная морось', emoji: '🌧️', fx: 'rain' },
+                61: { text: 'Небольшой дождь', emoji: '🌧️', fx: 'rain' },
+                63: { text: 'Умеренный дождь', emoji: '🌧️', fx: 'rain' },
+                65: { text: 'Сильный ливень', emoji: '🌧️', fx: 'rain' },
+                66: { text: 'Ледяной дождь', emoji: '🌨️', fx: 'rain' },
+                67: { text: 'Сильный ледяной дождь', emoji: '🌨️', fx: 'rain' },
+                71: { text: 'Небольшой снегопад', emoji: '🌨️', fx: 'snow' },
+                73: { text: 'Умеренный снегопад', emoji: '❄️', fx: 'snow' },
+                75: { text: 'Сильная метель', emoji: '❄️', fx: 'snow' },
+                77: { text: 'Снежные зерна', emoji: '❄️', fx: 'snow' },
+                80: { text: 'Ливневый дождь', emoji: '🌦️', fx: 'rain' },
+                81: { text: 'Сильный ливень', emoji: '🌧️', fx: 'rain' },
+                82: { text: 'Тропический шквал', emoji: '⛈️', fx: 'storm' },
+                85: { text: 'Снежный заряд', emoji: '🌨️', fx: 'snow' },
+                86: { text: 'Сильный снежный шквал', emoji: '❄️', fx: 'snow' },
+                95: { text: 'Гроза с дождем', emoji: '⛈️', fx: 'storm' },
+                96: { text: 'Гроза с градом', emoji: '⛈️', fx: 'storm' },
+                99: { text: 'Сильная гроза с градом', emoji: '⛈️', fx: 'storm' }
+            };
+            return map[code] || { text: 'Переменная погода', emoji: '🌤️', fx: 'clouds' };
+        }
+
+        // =========================================================================
+        // 4. INTERACTIVE 3D GLOBE (GLOBE.GL / THREE.JS)
+        // =========================================================================
+        let globeInstance = null;
+        let selectedPin = { lat: 55.7558, lng: 37.6173, name: 'Москва' };
+        let isCardMinimized = false;
+
+        function init3DGlobe() {
+            const container = document.getElementById('globe-container');
+
+            globeInstance = Globe()(container)
+                .globeImageUrl('https://unpkg.com/three-globe/example/img/earth-blue-marble.jpg')
+                .bumpImageUrl('https://unpkg.com/three-globe/example/img/earth-topology.png')
+                .backgroundImageUrl('https://unpkg.com/three-globe/example/img/night-sky.png')
+                .showAtmosphere(true)
+                .atmosphereColor('#38bdf8')
+                .atmosphereAltitude(0.18)
+                // Кольца-пульсации вокруг выбранной точки на Земле
+                .ringsData([selectedPin])
+                .ringColor(() => t => `rgba(56, 189, 248, ${1 - t})`)
+                .ringMaxRadius(5)
+                .ringPropagationSpeed(2.2)
+                .ringRepeatPeriod(900)
+                // HTML-маркеры для крупных городов и текущей выбранной точки
+                .htmlElementsData(getGlobeMarkersData())
+                .htmlElement(d => {
+                    const el = document.createElement('div');
+                    el.className = 'globe-pin';
+                    if (d.isSelected) {
+                        el.innerHTML = `
+                            <div class="flex flex-col items-center -translate-y-4">
+                                <div class="px-2.5 py-1 rounded-full bg-cyan-500 text-slate-950 font-extrabold text-[11px] shadow-[0_0_20px_rgba(6,182,212,0.9)] flex items-center gap-1 whitespace-nowrap border-2 border-white">
+                                    <span>📍 ${d.name}</span>
+                                    ${d.temp !== null && d.temp !== undefined ? `<span>${d.temp > 0 ? '+' + d.temp : d.temp}°</span>` : ''}
+                                </div>
+                                <div class="w-0.5 h-3 bg-cyan-400"></div>
+                                <div class="w-2.5 h-2.5 rounded-full bg-white ring-4 ring-cyan-400/60"></div>
+                            </div>
+                        `;
+                    } else {
+                        el.innerHTML = `
+                            <div class="px-2 py-0.5 rounded-full bg-slate-900/85 hover:bg-cyan-500 hover:text-slate-950 text-white font-bold text-[10px] border border-white/25 backdrop-blur-md shadow-md flex items-center gap-1 whitespace-nowrap transition">
+                                <span>${d.name}</span>
+                                ${d.temp !== null && d.temp !== undefined ? `<span class="text-cyan-300 font-extrabold">${d.temp > 0 ? '+' + d.temp : d.temp}°</span>` : ''}
+                            </div>
+                        `;
+                    }
+                    el.onclick = (e) => {
+                        e.stopPropagation();
+                        selectLocationByCoords(d.lat, d.lng, d.name, d.country, d.photo);
+                    };
+                    return el;
+                })
+                .onGlobeClick(({ lat, lng }) => {
+                    haptic('medium');
+                    selectLocationByCoords(lat, lng);
+                });
+
+            // Плавное вращение и настройка камеры
+            const controls = globeInstance.controls();
+            controls.autoRotate = true;
+            controls.autoRotateSpeed = 0.35;
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.07;
+            controls.minDistance = 125;
+            controls.maxDistance = 450;
+
+            // Останавливаем автовращение при взаимодействии пользователя
+            container.addEventListener('pointerdown', () => {
+                controls.autoRotate = false;
+            });
+
+            // Начальный фокус на Москве
+            globeInstance.pointOfView({ lat: 55.7558, lng: 37.6173, altitude: 1.75 }, 1200);
+
+            window.addEventListener('resize', () => {
+                globeInstance.width(window.innerWidth);
+                globeInstance.height(window.innerHeight);
+                resizeWeatherCanvas();
+            });
+        }
+
+        function getGlobeMarkersData() {
+            const list = PRESET_CITIES.map(c => ({
+                ...c,
+                isSelected: Math.abs(c.lat - selectedPin.lat) < 0.25 && Math.abs(c.lng - selectedPin.lng) < 0.25
+            }));
+
+            const alreadyInPresets = list.some(c => c.isSelected);
+            if (!alreadyInPresets && selectedPin) {
+                list.push({
+                    ...selectedPin,
+                    isSelected: true
+                });
+            }
+            return list;
+        }
+
+        function resetGlobeView() {
+            haptic('light');
+            if (globeInstance) {
+                globeInstance.pointOfView({ lat: selectedPin.lat, lng: selectedPin.lng, altitude: 2.1 }, 1000);
+                globeInstance.controls().autoRotate = true;
+            }
+        }
+
+        function flyToRandomPlace() {
+            haptic('medium');
+            const randomCity = PRESET_CITIES[Math.floor(Math.random() * PRESET_CITIES.length)];
+            selectLocationByCoords(randomCity.lat, randomCity.lng, randomCity.name, randomCity.country, randomCity.photo);
+        }
+
+        // =========================================================================
+        // 5. REVERSE GEOCODING, WIKIPEDIA CITY PHOTO & OPEN-METEO WEATHER API
+        // =========================================================================
+        let realWeatherEffect = 'rain';
+
+        async function selectLocationByCoords(lat, lng, forcedName = null, forcedCountry = null, forcedPhoto = null) {
+            const cleanLat = Number(lat.toFixed(4));
+            const cleanLng = Number(lng.toFixed(4));
+
+            document.getElementById('globe-status-text').textContent = `Спутниковое сканирование: ${cleanLat}°, ${cleanLng}°...`;
+
+            // Перемещаем камеру глобуса к выбранной точке
+            selectedPin = { lat: cleanLat, lng: cleanLng, name: forcedName || 'Точка на карте', temp: null };
+            if (globeInstance) {
+                globeInstance.ringsData([selectedPin]);
+                globeInstance.htmlElementsData(getGlobeMarkersData());
+                globeInstance.pointOfView({ lat: cleanLat - 12, lng: cleanLng, altitude: 1.55 }, 1100);
+            }
+
+            // Если карточка была свернута — разворачиваем
+            if (isCardMinimized) {
+                toggleCardMinimize(false);
+            }
+
+            // 1. Определяем название города или региона (Reverse Geocoding) если кликнули по глобусу
+            let cityName = forcedName;
+            let countryName = forcedCountry || '';
+            let wikiQueryTitle = forcedName;
+
+            if (!cityName) {
+                try {
+                    const geoRes = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${cleanLat}&lon=${cleanLng}&zoom=10&accept-language=ru`);
+                    if (geoRes.ok) {
+                        const geoData = await geoRes.json();
+                        const addr = geoData.address || {};
+                        cityName = addr.city || addr.town || addr.village || addr.state || addr.county || addr.country || 'Океан / Открытая местность';
+                        countryName = addr.country || 'Международные воды';
+                        wikiQueryTitle = addr.city || addr.town || addr.state || addr.country || cityName;
+                    }
+                } catch (e) {
+                    cityName = `Координаты ${cleanLat}°, ${cleanLng}°`;
+                    countryName = 'Земной шар';
+                }
+            }
+
+            // 2. Запрашиваем реальную погоду из Open-Meteo API
+            try {
+                const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${cleanLat}&longitude=${cleanLng}&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,surface_pressure,wind_speed_10m&hourly=temperature_2m,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min&wind_speed_unit=ms&timezone=auto`;
+                const weatherRes = await fetch(weatherUrl);
+                const weatherData = await weatherRes.json();
+
+                updateWeatherUI(cityName, countryName, cleanLat, cleanLng, weatherData);
+
+                // Обновляем температуру на пине глобуса
+                const currentTempRounded = Math.round(weatherData.current.temperature_2m);
+                selectedPin.name = cityName;
+                selectedPin.temp = currentTempRounded;
+                const presetMatch = PRESET_CITIES.find(c => Math.abs(c.lat - cleanLat) < 0.3 && Math.abs(c.lng - cleanLng) < 0.3);
+                if (presetMatch) presetMatch.temp = currentTempRounded;
+                if (globeInstance) {
+                    globeInstance.htmlElementsData(getGlobeMarkersData());
+                }
+                renderQuickCitiesBar();
+            } catch (err) {
+                console.error('Weather fetch error:', err);
+            }
+
+            // 3. Подгружаем реальную фотографию города (из пресета или напрямую из Википедии)
+            updateCityBackgroundPhoto(wikiQueryTitle || cityName, forcedPhoto, cleanLat);
+        }
+
+        async function updateCityBackgroundPhoto(cityTitle, forcedPhoto, lat = 0) {
+            const imgEl = document.getElementById('city-bg-photo');
+            const sourceLabel = document.getElementById('photo-source-label');
+
+            // Проверяем, есть ли город в нашем списке с проверенным HD-фото
+            const preset = PRESET_CITIES.find(c => c.name.toLowerCase() === (cityTitle || '').toLowerCase());
+            if (forcedPhoto || preset?.photo) {
+                imgEl.src = forcedPhoto || preset.photo;
+                sourceLabel.textContent = `Фото: ${cityTitle}`;
+                return;
+            }
+
+            // Пытаемся получить реальное фото города через Wikipedia REST API (RU, затем EN)
+            if (cityTitle && !cityTitle.includes('Координаты') && !cityTitle.includes('Океан')) {
+                try {
+                    const wikiRes = await fetch(`https://ru.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(cityTitle)}`);
+                    if (wikiRes.ok) {
+                        const wikiData = await wikiRes.json();
+                        const photoUrl = wikiData.originalimage?.source || wikiData.thumbnail?.source;
+                        if (photoUrl) {
+                            imgEl.src = photoUrl;
+                            sourceLabel.textContent = `Фото: ${cityTitle} (Wiki)`;
+                            return;
+                        }
+                    }
+                } catch (e) {}
+            }
+
+            // Красивая резервная фотография по широте/климату
+            if (Math.abs(lat) > 62) {
+                imgEl.src = 'https://images.unsplash.com/photo-1504893524553-b855bce32c67?auto=format&fit=crop&w=1000&q=80';
+            } else if (Math.abs(lat) < 23) {
+                imgEl.src = 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1000&q=80';
+            } else {
+                const idx = Math.abs(Math.floor(lat * 10)) % SCENIC_FALLBACK_PHOTOS.length;
+                imgEl.src = SCENIC_FALLBACK_PHOTOS[idx];
+            }
+            sourceLabel.textContent = `Панорама региона`;
+        }
+
+        function updateWeatherUI(cityName, countryName, lat, lng, data) {
+            const current = data.current;
+            const info = interpretWeatherCode(current.weather_code, current.is_day);
+
+            // Заголовки и координаты
+            document.getElementById('city-title').textContent = cityName;
+            const latDir = lat >= 0 ? 'N' : 'S';
+            const lngDir = lng >= 0 ? 'E' : 'W';
+            document.getElementById('city-coords-badge').textContent = `${Math.abs(lat).toFixed(2)}° ${latDir}, ${Math.abs(lng).toFixed(2)}° ${lngDir}`;
+
+            // Вычисляем местное время города по часовому поясу из ответа API
+            let localTimeStr = '--:--';
+            try {
+                if (data.timezone) {
+                    localTimeStr = new Intl.DateTimeFormat('ru-RU', {
+                        timeZone: data.timezone,
+                        hour: '2-digit',
+                        minute: '2-digit'
+                    }).format(new Date());
+                }
+            } catch (e) {}
+
+            document.getElementById('city-country').innerHTML = `${countryName || 'Координаты Земли'} • Местное время <span class="text-white font-bold">${localTimeStr}</span>`;
+
+            // Температура
+            const temp = Math.round(current.temperature_2m);
+            const feels = Math.round(current.apparent_temperature);
+            document.getElementById('main-temp').textContent = `${temp > 0 ? '+' + temp : temp}°`;
+            document.getElementById('feels-like-temp').textContent = `${feels > 0 ? '+' + feels : feels}°`;
+
+            // Описание погоды
+            document.getElementById('weather-emoji').textContent = info.emoji;
+            document.getElementById('weather-desc-text').textContent = info.text;
+
+            // Метрики
+            document.getElementById('metric-wind').textContent = `${current.wind_speed_10m.toFixed(1)} м/с`;
+            document.getElementById('metric-humidity').textContent = `${current.relative_humidity_2m}%`;
+            // Перевод гПа в мм рт. ст. (1 hPa = 0.750062 mmHg)
+            const pressureMmHg = Math.round((current.surface_pressure || 1013) * 0.750062);
+            document.getElementById('metric-pressure').textContent = `${pressureMmHg} мм`;
+            document.getElementById('metric-precip').textContent = `${current.precipitation.toFixed(1)} мм`;
+
+            // Почасовой прогноз (следующие 24 часа)
+            const hourlyContainer = document.getElementById('hourly-forecast-container');
+            const hourlyTimes = data.hourly?.time || [];
+            const hourlyTemps = data.hourly?.temperature_2m || [];
+            const hourlyCodes = data.hourly?.weather_code || [];
+
+            let hourlyHTML = '';
+            for (let i = 0; i < Math.min(24, hourlyTimes.length); i += 2) {
+                const timePart = hourlyTimes[i].split('T')[1] || '00:00';
+                const hTemp = Math.round(hourlyTemps[i]);
+                const hInfo = interpretWeatherCode(hourlyCodes[i], 1);
+                hourlyHTML += `
+                    <div class="flex flex-col items-center justify-between bg-white/5 border border-white/10 rounded-xl px-2.5 py-2 shrink-0 min-w-[58px]">
+                        <span class="text-[10px] text-slate-300 font-medium">${i === 0 ? 'Сейчас' : timePart}</span>
+                        <span class="text-base my-1">${hInfo.emoji}</span>
+                        <span class="text-xs font-extrabold text-white">${hTemp > 0 ? '+' + hTemp : hTemp}°</span>
+                    </div>
+                `;
+            }
+            hourlyContainer.innerHTML = hourlyHTML;
+
+            // Суточный прогноз (5 дней)
+            const dailyContainer = document.getElementById('daily-forecast-container');
+            const dailyTimes = data.daily?.time || [];
+            const dailyMax = data.daily?.temperature_2m_max || [];
+            const dailyMin = data.daily?.temperature_2m_min || [];
+            const dailyCodes = data.daily?.weather_code || [];
+
+            const dayNames = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+            let dailyHTML = '';
+            for (let i = 0; i < Math.min(5, dailyTimes.length); i++) {
+                const dateObj = new Date(dailyTimes[i]);
+                const dayLabel = i === 0 ? 'Сегодня' : `${dayNames[dateObj.getDay()]}, ${dateObj.getDate()}.${String(dateObj.getMonth() + 1).padStart(2, '0')}`;
+                const dInfo = interpretWeatherCode(dailyCodes[i], 1);
+                const tMax = Math.round(dailyMax[i]);
+                const tMin = Math.round(dailyMin[i]);
+
+                dailyHTML += `
+                    <div class="py-2 flex items-center justify-between text-xs">
+                        <span class="font-semibold text-slate-200 w-24">${dayLabel}</span>
+                        <div class="flex items-center gap-1.5 flex-1 justify-center">
+                            <span>${dInfo.emoji}</span>
+                            <span class="text-[11px] text-slate-300 truncate max-w-[115px]">${dInfo.text}</span>
+                        </div>
+                        <div class="font-mono font-bold text-right w-20">
+                            <span class="text-slate-400">${tMin > 0 ? '+' + tMin : tMin}°</span>
+                            <span class="text-slate-600 mx-0.5">/</span>
+                            <span class="text-white">${tMax > 0 ? '+' + tMax : tMax}°</span>
+                        </div>
+                    </div>
+                `;
+            }
+            dailyContainer.innerHTML = dailyHTML;
+
+            // Устанавливаем живой погодный эффект на карточке в соответствии с реальной погодой
+            realWeatherEffect = info.fx;
+            document.getElementById('btn-restore-real-fx').classList.add('hidden');
+            setWeatherEffect(realWeatherEffect);
+            document.getElementById('globe-status-text').textContent = `Выбрано: ${cityName} (${temp > 0 ? '+' + temp : temp}°C, ${info.text})`;
+        }
+
+        // =========================================================================
+        // 6. DYNAMIC WEATHER PARTICLE ENGINE ON THE CARD (RAIN, SNOW, STORM, SUN, MIST)
+        // =========================================================================
+        const fxCanvas = document.getElementById('weather-fx-canvas');
+        const fxCtx = fxCanvas.getContext('2d');
+        let currentFxMode = 'rain';
+        let particles = [];
+
+        function resizeWeatherCanvas() {
+            const card = fxCanvas.parentElement;
+            if (!card) return;
+            fxCanvas.width = card.clientWidth;
+            fxCanvas.height = card.clientHeight;
+        }
+
+        function createParticlesForMode(mode) {
+            resizeWeatherCanvas();
+            particles = [];
+            const w = fxCanvas.width || 400;
+            const h = fxCanvas.height || 600;
+
+            if (mode === 'rain' || mode === 'storm') {
+                const count = mode === 'storm' ? 115 : 75;
+                for (let i = 0; i < count; i++) {
+                    particles.push({
+                        x: Math.random() * w,
+                        y: Math.random() * h,
+                        len: 14 + Math.random() * 18,
+                        speedY: 11 + Math.random() * 9,
+                        speedX: mode === 'storm' ? -2.5 : -0.8,
+                        alpha: 0.25 + Math.random() * 0.45
+                    });
+                }
+            } else if (mode === 'snow') {
+                for (let i = 0; i < 65; i++) {
+                    particles.push({
+                        x: Math.random() * w,
+                        y: Math.random() * h,
+                        r: 1.5 + Math.random() * 3.2,
+                        speedY: 0.8 + Math.random() * 1.6,
+                        drift: Math.random() * Math.PI * 2,
+                        alpha: 0.45 + Math.random() * 0.5
+                    });
+                }
+            } else if (mode === 'clear') {
+                // Солнечные блики и теплые частицы в воздухе
+                for (let i = 0; i < 28; i++) {
+                    particles.push({
+                        x: Math.random() * w,
+                        y: Math.random() * h,
+                        r: 2 + Math.random() * 6,
+                        speedY: -0.25 - Math.random() * 0.35,
+                        speedX: (Math.random() - 0.5) * 0.4,
+                        alpha: 0.15 + Math.random() * 0.35
+                    });
+                }
+            } else if (mode === 'clouds') {
+                // Мягкие слои тумана/облаков
+                for (let i = 0; i < 18; i++) {
+                    particles.push({
+                        x: Math.random() * w,
+                        y: Math.random() * (h * 0.65),
+                        r: 55 + Math.random() * 80,
+                        speedX: 0.2 + Math.random() * 0.35,
+                        alpha: 0.05 + Math.random() * 0.08
+                    });
+                }
+            }
+        }
+
+        function setWeatherEffect(mode) {
+            currentFxMode = mode;
+            createParticlesForMode(mode);
+
+            // Подсветка активной кнопки эффекта
+            ['clear', 'rain', 'storm', 'snow', 'clouds'].forEach(m => {
+                const btn = document.getElementById(`fx-btn-${m}`);
+                if (!btn) return;
+                if (m === mode) {
+                    btn.className = 'fx-btn py-1.5 px-1 rounded-xl text-[11px] font-bold bg-cyan-500/30 border border-cyan-400/60 text-white transition flex flex-col items-center gap-0.5 shadow';
+                } else {
+                    btn.className = 'fx-btn py-1.5 px-1 rounded-xl text-[11px] font-semibold bg-white/5 hover:bg-white/15 text-slate-200 transition flex flex-col items-center gap-0.5';
+                }
+            });
+
+            // Слой молнии только для грозы
+            const lightningLayer = document.getElementById('lightning-layer');
+            if (mode === 'storm') {
+                lightningLayer.classList.remove('hidden');
+            } else {
+                lightningLayer.classList.add('hidden');
+            }
+        }
+
+        function setWeatherEffectManual(mode) {
+            haptic('light');
+            setWeatherEffect(mode);
+            const restoreBtn = document.getElementById('btn-restore-real-fx');
+            if (mode !== realWeatherEffect) {
+                restoreBtn.classList.remove('hidden');
+            } else {
+                restoreBtn.classList.add('hidden');
+            }
+        }
+
+        function restoreRealWeatherEffect() {
+            haptic('light');
+            document.getElementById('btn-restore-real-fx').classList.add('hidden');
+            setWeatherEffect(realWeatherEffect);
+        }
+
+        function animateWeatherCanvas() {
+            const w = fxCanvas.width;
+            const h = fxCanvas.height;
+            fxCtx.clearRect(0, 0, w, h);
+
+            if (currentFxMode === 'rain' || currentFxMode === 'storm') {
+                fxCtx.strokeStyle = 'rgba(186, 230, 253, 0.65)';
+                fxCtx.lineWidth = currentFxMode === 'storm' ? 1.6 : 1.2;
+                fxCtx.lineCap = 'round';
+
+                for (let p of particles) {
+                    fxCtx.beginPath();
+                    fxCtx.moveTo(p.x, p.y);
+                    fxCtx.lineTo(p.x + p.speedX * 2, p.y + p.len);
+                    fxCtx.stroke();
+
+                    p.y += p.speedY;
+                    p.x += p.speedX;
+
+                    if (p.y > h) {
+                        p.y = -20;
+                        p.x = Math.random() * w;
+                    }
+                    if (p.x < 0) p.x = w;
+                }
+            } else if (currentFxMode === 'snow') {
+                for (let p of particles) {
+                    fxCtx.fillStyle = `rgba(255, 255, 255, ${p.alpha})`;
+                    fxCtx.beginPath();
+                    fxCtx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+                    fxCtx.fill();
+
+                    p.y += p.speedY;
+                    p.drift += 0.02;
+                    p.x += Math.sin(p.drift) * 0.65;
+
+                    if (p.y > h) {
+                        p.y = -10;
+                        p.x = Math.random() * w;
+                    }
+                }
+            } else if (currentFxMode === 'clear') {
+                // Теплое солнечное свечение в правом верхнем углу карточки
+                const sunGrad = fxCtx.createRadialGradient(w * 0.85, h * 0.1, 5, w * 0.85, h * 0.1, w * 0.7);
+                sunGrad.addColorStop(0, 'rgba(253, 224, 71, 0.28)');
+                sunGrad.addColorStop(0.5, 'rgba(251, 146, 60, 0.10)');
+                sunGrad.addColorStop(1, 'rgba(251, 146, 60, 0)');
+                fxCtx.fillStyle = sunGrad;
+                fxCtx.fillRect(0, 0, w, h);
+
+                for (let p of particles) {
+                    fxCtx.fillStyle = `rgba(254, 240, 138, ${p.alpha})`;
+                    fxCtx.beginPath();
+                    fxCtx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+                    fxCtx.fill();
+
+                    p.y += p.speedY;
+                    p.x += p.speedX;
+                    if (p.y < -10) {
+                        p.y = h + 10;
+                        p.x = Math.random() * w;
+                    }
+                }
+            } else if (currentFxMode === 'clouds') {
+                for (let p of particles) {
+                    const grad = fxCtx.createRadialGradient(p.x, p.y, 5, p.x, p.y, p.r);
+                    grad.addColorStop(0, `rgba(226, 232, 240, ${p.alpha})`);
+                    grad.addColorStop(1, 'rgba(226, 232, 240, 0)');
+                    fxCtx.fillStyle = grad;
+                    fxCtx.beginPath();
+                    fxCtx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+                    fxCtx.fill();
+
+                    p.x += p.speedX;
+                    if (p.x - p.r > w) {
+                        p.x = -p.r;
+                    }
+                }
+            }
+
+            requestAnimationFrame(animateWeatherCanvas);
+        }
+
+        // =========================================================================
+        // 7. CITY SEARCH BY NAME (AUTOCOMPLETE VIA OPEN-METEO GEOCODING API)
+        // =========================================================================
+        const searchInput = document.getElementById('city-search-input');
+        const searchResults = document.getElementById('search-results');
+        const clearBtn = document.getElementById('clear-search-btn');
+        let searchTimeout = null;
+
+        searchInput.addEventListener('input', (e) => {
+            const q = e.target.value.trim();
+            clearBtn.classList.toggle('hidden', q.length === 0);
+
+            if (searchTimeout) clearTimeout(searchTimeout);
+            if (q.length < 2) {
+                searchResults.classList.add('hidden');
+                return;
+            }
+
+            searchTimeout = setTimeout(async () => {
+                try {
+                    const res = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=6&language=ru&format=json`);
+                    const data = await res.json();
+                    renderSearchSuggestions(data.results || []);
+                } catch (err) {
+                    console.error('Search error:', err);
+                }
+            }, 260);
+        });
+
+        function renderSearchSuggestions(results) {
+            if (!results.length) {
+                searchResults.innerHTML = `<div class="p-3.5 text-xs text-slate-400 text-center">Город не найден. Попробуйте другое название или нажмите на глобус.</div>`;
+                searchResults.classList.remove('hidden');
+                return;
+            }
+
+            searchResults.innerHTML = results.map(item => `
+                <button 
+                    onclick="selectCityFromSearch(${item.latitude}, ${item.longitude}, '${(item.name || '').replace(/'/g, "\\'")}', '${(item.country || item.admin1 || '').replace(/'/g, "\\'")}')"
+                    class="w-full px-4 py-2.5 text-left hover:bg-cyan-500/20 flex items-center justify-between transition"
+                >
+                    <div class="flex items-center gap-2.5 min-w-0">
+                        <i data-lucide="map-pin" class="w-4 h-4 text-cyan-400 shrink-0"></i>
+                        <div class="truncate">
+                            <p class="text-xs font-bold text-white truncate">${item.name}</p>
+                            <p class="text-[10px] text-slate-400 truncate">${[item.admin1, item.country].filter(Boolean).join(', ')}</p>
+                        </div>
+                    </div>
+                    <span class="text-[10px] font-mono text-slate-400 shrink-0 ml-2">${item.latitude.toFixed(1)}°, ${item.longitude.toFixed(1)}°</span>
+                </button>
+            `).join('');
+
+            searchResults.classList.remove('hidden');
+            lucide.createIcons();
+        }
+
+        function selectCityFromSearch(lat, lng, name, country) {
+            haptic('medium');
+            searchResults.classList.add('hidden');
+            searchInput.value = name;
+            selectLocationByCoords(lat, lng, name, country);
+        }
+
+        function clearSearch() {
+            searchInput.value = '';
+            clearBtn.classList.add('hidden');
+            searchResults.classList.add('hidden');
+            searchInput.focus();
+        }
+
+        // Закрываем выпадающий список при клике вне поиска
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('#city-search-input') && !e.target.closest('#search-results')) {
+                searchResults.classList.add('hidden');
+            }
+        });
+
+        // =========================================================================
+        // 8. QUICK CITIES BAR & CARD MINIMIZE TOGGLE
+        // =========================================================================
+        function renderQuickCitiesBar() {
+            const bar = document.getElementById('quick-cities-bar');
+            bar.innerHTML = PRESET_CITIES.map(c => {
+                const isActive = Math.abs(c.lat - selectedPin.lat) < 0.25 && Math.abs(c.lng - selectedPin.lng) < 0.25;
+                return `
+                    <button 
+                        onclick="selectLocationByCoords(${c.lat}, ${c.lng}, '${c.name}', '${c.country}', '${c.photo}')"
+                        class="px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition flex items-center gap-1.5 shadow ${
+                            isActive 
+                            ? 'bg-cyan-500 text-slate-950 font-extrabold' 
+                            : 'glass-panel text-slate-200 hover:bg-slate-800/80'
+                        }"
+                    >
+                        <span>${c.name}</span>
+                        ${c.temp !== null ? `<span class="${isActive ? 'text-slate-900' : 'text-cyan-400'} font-bold">${c.temp > 0 ? '+' + c.temp : c.temp}°</span>` : ''}
+                    </button>
+                `;
+            }).join('');
+        }
+
+        function toggleCardMinimize(forceState = null) {
+            haptic('light');
+            const body = document.getElementById('card-collapsible-body');
+            const btn = document.getElementById('minimize-card-btn');
+            isCardMinimized = forceState !== null ? forceState : !isCardMinimized;
+
+            if (isCardMinimized) {
+                body.classList.add('hidden');
+                btn.innerHTML = `<i data-lucide="chevron-up" class="w-4 h-4"></i>`;
+            } else {
+                body.classList.remove('hidden');
+                btn.innerHTML = `<i data-lucide="chevron-down" class="w-4 h-4"></i>`;
+            }
+            lucide.createIcons();
+            setTimeout(resizeWeatherCanvas, 50);
+        }
+
+        // Фоновая подгрузка температур для всех мировых столиц на глобусе
+        async function preloadWorldCapitalsWeather() {
+            try {
+                const lats = PRESET_CITIES.map(c => c.lat).join(',');
+                const lngs = PRESET_CITIES.map(c => c.lng).join(',');
+                const res = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lngs}&current=temperature_2m`);
+                const data = await res.json();
+                if (Array.isArray(data)) {
+                    data.forEach((item, idx) => {
+                        if (PRESET_CITIES[idx] && item.current) {
+                            PRESET_CITIES[idx].temp = Math.round(item.current.temperature_2m);
+                        }
+                    });
+                    renderQuickCitiesBar();
+                    if (globeInstance) {
+                        globeInstance.htmlElementsData(getGlobeMarkersData());
+                    }
+                }
+            } catch (e) {}
+        }
+
+        // =========================================================================
+        // 9. BOOTSTRAP APPLICATION ON WINDOW LOAD
+        // =========================================================================
+        window.onload = function () {
+            lucide.createIcons();
+            renderQuickCitiesBar();
+            init3DGlobe();
+            resizeWeatherCanvas();
+            animateWeatherCanvas();
+
+            // Загружаем реальную погоду для стартового города (Москва) и столиц мира
+            selectLocationByCoords(55.7558, 37.6173, 'Москва', 'Россия', PRESET_CITIES[0].photo);
+            preloadWorldCapitalsWeather();
+        };
+    </script>
+</body>
+</html>
